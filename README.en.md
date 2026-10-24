@@ -222,7 +222,8 @@ holding for the account but has not granted yet, pass the Aliyun captcha,
 claim them, and refresh the account's state.
 
 1. In the sign-in menu pick "领取赠送套餐" (claim gift plans), then an
-   account (the local ZCode app's sign-in, or any zcode-switch account);
+   account (the local ZCode app's sign-in, an account already signed in to
+   magpie / OpenCode, or any zcode-switch account);
 2. the plugin serves a temporary page on `127.0.0.1` and opens it in the
    browser: it lists the claimable plans found by a live scan (name,
    grants, period);

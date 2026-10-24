@@ -233,7 +233,34 @@ test("the plugin offers claiming as a ninth sign-in method", async () => {
   assert.ok(options.some((o) => o.value === "sw:ada"), "accounts with a JWT are claimable")
   assert.ok(!options.some((o) => o.value === "sw:bob"), "accounts without a JWT are not listed")
   await assert.rejects(() => m.authorize({ account: "sw:missing" }), /找不到账号/)
+  await assert.rejects(() => m.authorize({ account: "auth:magpie:missing" }), /找不到这个登录/)
   await assert.rejects(() => m.authorize({ account: "nonsense" }), /请选择/)
+})
+
+test("claim options include accounts already signed in to the host", () => {
+  const home = mkdtempSync(join(tmpdir(), "zsw-auth-store-"))
+  try {
+    const dir = join(home, ".config", "magpie")
+    mkdirSync(dir, { recursive: true })
+    const state = { source: "zcode-switch", site: "zai", device: "11111111-2222-4333-8444-555555555555", jwt: accountJWT("store-user") }
+    writeFileSync(
+      join(dir, "plugin-auth.json"),
+      JSON.stringify({
+        zcode: { type: "oauth", refresh: JSON.stringify(state), access: "", expires: 0, accountId: "Store User" },
+        "zcode#abcdef12": { type: "oauth", refresh: JSON.stringify({ ...state, jwt: "" }), access: "k.secret", expires: 0, accountId: "Key Only" },
+        other: { type: "oauth", refresh: "{}", accountId: "Not ZCode" },
+      }),
+    )
+    const opts = _internal.claimOptions(() => {}, { home })
+    const auth = opts.filter((o) => o.value.startsWith("auth:"))
+    assert.equal(auth.length, 1)
+    assert.equal(auth[0].value, "auth:magpie:zcode")
+    assert.match(auth[0].label, /Store User/)
+    assert.ok(!opts.some((o) => o.value.includes("abcdef12")), "entries without a JWT are not claimable")
+    assert.ok(!opts.some((o) => o.label.includes("Not ZCode")), "other providers are ignored")
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 test("ZCODE_AUTO_CLAIM parses like a switch", () => {

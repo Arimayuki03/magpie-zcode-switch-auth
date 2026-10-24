@@ -1936,12 +1936,49 @@ const CLAIM_METHOD_LABEL = "zcode: 领取赠送套餐"
 
 const autoClaim = () => ["1", "true", "yes", "on"].includes(String(process.env.ZCODE_AUTO_CLAIM ?? "").trim().toLowerCase())
 
+// authStoreEntries reads the host's own auth store — magpie keeps it at
+// ~/.config/magpie/plugin-auth.json, OpenCode at ~/.local/share/opencode/
+// auth.json. The provider's entries here are what getAuth hands the loader;
+// the claim method offers them so an account already signed in to the host
+// can claim without coming from zcode-switch's library. Read is local and
+// offline, and nothing from it is logged.
+function authStoreEntries({ home = homedir() } = {}) {
+  const out = []
+  const stores = [
+    ["magpie", join(home, ".config", "magpie", "plugin-auth.json")],
+    ["opencode", join(home, ".local", "share", "opencode", "auth.json")],
+  ]
+  for (const [tag, file] of stores) {
+    const raw = readJSON(file)
+    if (!raw || typeof raw !== "object") continue
+    for (const [id, e] of Object.entries(raw)) {
+      if (!/^zcode(#|$)/.test(id)) continue
+      if (e?.type !== "oauth" || typeof e?.refresh !== "string") continue
+      let st = {}
+      try {
+        st = JSON.parse(e.refresh)
+      } catch {}
+      out.push({ tag, id, accountId: first(String(e.accountId ?? ""), tag + ":" + id), state: st, entry: e })
+    }
+  }
+  return out
+}
+
 // claimOptions lists the accounts a claim can run for: the ZCode app's own
-// sign-in (its JWT is read from this machine at authorize time) and every
-// zcode-switch account that carries a ZCode session token. Reading them
-// stays local and offline, as the import dropdown's does.
-function claimOptions(log) {
+// sign-in (its JWT is read from this machine at authorize time), the
+// accounts already signed in to the host, and every zcode-switch account
+// that carries a ZCode session token. Reading them stays local and offline,
+// as the import dropdown's does.
+function claimOptions(log, opts) {
   const options = [{ label: "ZCode app 的当前登录", value: "__app__", hint: "本机 ZCode 客户端当前登录的账号" }]
+  try {
+    for (const a of authStoreEntries(opts)) {
+      if (!a.state.jwt) continue
+      options.push({ label: `${a.accountId}（已登录）`, value: `auth:${a.tag}:${a.id}`, hint: "当前 magpie / OpenCode 里已登录的账号" })
+    }
+  } catch (e) {
+    log?.(`auth store: ${e?.message ?? e}`)
+  }
   try {
     const { accounts } = switchScan(log)
     for (const a of accounts.slice(0, SWITCH_MAX_OPTIONS)) {
@@ -1971,6 +2008,25 @@ async function claimAuthorize(inputs, ctx) {
     device = own.device || anyDevice
     label = own.user || "ZCode app"
     refresh = () => asZCode().callback()
+  } else if (pick.startsWith("auth:")) {
+    const rest = pick.slice(5)
+    const a = authStoreEntries().find((x) => x.tag + ":" + x.id === rest)
+    if (!a) throw new Error("宿主里找不到这个登录了；重新打开领取菜单再试")
+    if (!a.state.jwt) throw new Error("该账号没有可用的 ZCode 会话（JWT）；重新导入该账号后再领取")
+    jwt = a.state.jwt
+    device = a.state.device || anyDevice
+    label = a.accountId
+    // the claim adds plans without touching the sign-in's own credentials:
+    // the entry goes back as it is, and the cleared caches below make the
+    // next usage read carry the claimed plans
+    refresh = () => ({
+      type: "success",
+      refresh: a.entry.refresh,
+      access: first(String(a.entry.access ?? ""), a.state.key ?? "", a.state.jwt ?? ""),
+      expires: a.entry.expires ?? 0,
+      accountId: first(String(a.entry.accountId ?? ""), a.accountId),
+      ...(a.entry.uid ? { uid: a.entry.uid } : {}),
+    })
   } else if (pick.startsWith("sw:")) {
     const id = pick.slice(3)
     const { accounts, dir } = switchScan(ctx.log)
@@ -2383,5 +2439,5 @@ export const _internal = {
   entry, limitWindows, termOf, startUsage, routes, blocked, plansOf, giftOf, dualUsage, claimHints, spentUp, giftServes, modelOf,
   teamKeys, ownSignIn, stateOf, dress, PROMPT,
   switchScan, switchOptions, switchResult, switchAuthEntry, switchImport, switchImportOne, switchImportAll, switchImportBundle,
-  switchAuthorize, claimOptions, claimAuthorize, autoClaim,
+  switchAuthorize, claimOptions, claimAuthorize, autoClaim, authStoreEntries,
 }
