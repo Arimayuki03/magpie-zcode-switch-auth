@@ -13,6 +13,7 @@ import {
   previewPlans,
   startClaimSession,
 } from "../src/claim.mjs"
+import { jwtExpired } from "../src/zswitch.mjs"
 
 const META = { appVersion: "3.16.3", platform: "linux-x64", osCategory: "linux", osVersion: "6.1.0", language: "zh-CN", timezone: "Asia/Shanghai" }
 const officialURL = (u) => new URL(String(u))
@@ -260,6 +261,71 @@ test("claim options include accounts already signed in to the host", () => {
     assert.ok(!opts.some((o) => o.label.includes("Not ZCode")), "other providers are ignored")
   } finally {
     rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("a host entry and its zcode-switch twin are listed once", () => {
+  const home = mkdtempSync(join(tmpdir(), "zsw-dedupe-"))
+  const switchHome = mkdtempSync(join(tmpdir(), "zsw-dedupe-sw-"))
+  const oldEnv = process.env.ZCODE_SWITCH_HOME
+  try {
+    const accounts = join(switchHome, ".zcode-switch", "accounts")
+    mkdirSync(accounts, { recursive: true })
+    const mk = (id, jwtToken) =>
+      writeFileSync(
+        join(accounts, id + ".json"),
+        JSON.stringify({
+          id,
+          name: id,
+          credentials: {
+            zcodejwttoken: jwtToken,
+            "oauth:active_provider": "zai",
+            "oauth:zai:user_info": JSON.stringify({ id, displayName: id }),
+          },
+          config: null,
+          virtual_device_mid: "",
+        }),
+      )
+    mk("ada", accountJWT("ada"))
+    mk("old", `${b64({ alg: "HS256" })}.${b64({ sub: "old", exp: Math.floor(Date.now() / 1000) - 60 })}.sig`)
+    process.env.ZCODE_SWITCH_HOME = switchHome
+
+    const dir = join(home, ".config", "magpie")
+    mkdirSync(dir, { recursive: true })
+    const expiredJwt = `${b64({ alg: "HS256" })}.${b64({ sub: "old", exp: Math.floor(Date.now() / 1000) - 60 })}.sig`
+    const store = {
+      zcode: {
+        type: "oauth",
+        refresh: JSON.stringify({ source: "zcode-switch", site: "zai", switchId: "ada", device: "d1", jwt: accountJWT("ada") }),
+        access: "",
+        expires: 0,
+        accountId: "Ada",
+      },
+      "zcode#expired": {
+        type: "oauth",
+        refresh: JSON.stringify({
+          source: "zcode-switch",
+          site: "zai",
+          switchId: "old",
+          device: "d2",
+          jwt: expiredJwt,
+        }),
+        access: "",
+        expires: 0,
+        accountId: "Old",
+      },
+    }
+    writeFileSync(join(dir, "plugin-auth.json"), JSON.stringify(store))
+    const values = _internal.claimOptions(() => {}, { home }).map((o) => o.value)
+    assert.ok(values.includes("auth:magpie:zcode"), "the live host entry is listed")
+    assert.ok(!values.includes("sw:ada"), "the library twin of a live entry is not listed twice")
+    assert.ok(values.includes("sw:old"), "an expired live session falls back to the library twin")
+    assert.ok(!values.includes("auth:magpie:zcode#expired"), "an expired host entry is not listed beside its twin")
+  } finally {
+    if (oldEnv === undefined) delete process.env.ZCODE_SWITCH_HOME
+    else process.env.ZCODE_SWITCH_HOME = oldEnv
+    rmSync(home, { recursive: true, force: true })
+    rmSync(switchHome, { recursive: true, force: true })
   }
 })
 

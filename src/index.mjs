@@ -1967,21 +1967,36 @@ function authStoreEntries({ home = homedir() } = {}) {
 // claimOptions lists the accounts a claim can run for: the ZCode app's own
 // sign-in (its JWT is read from this machine at authorize time), the
 // accounts already signed in to the host, and every zcode-switch account
-// that carries a ZCode session token. Reading them stays local and offline,
-// as the import dropdown's does.
+// that carries a ZCode session token. One row per login: an account that is
+// both signed in to the host and in zcode-switch's library is the same
+// login twice, so the live host entry is listed and the library's twin
+// stands in only when the live session has expired. Reading stays local and
+// offline, as the import dropdown's does.
 function claimOptions(log, opts) {
   const options = [{ label: "ZCode app 的当前登录", value: "__app__", hint: "本机 ZCode 客户端当前登录的账号" }]
+  let switchAccounts = []
+  try {
+    switchAccounts = switchScan(log).accounts.slice(0, SWITCH_MAX_OPTIONS)
+  } catch (e) {
+    log?.(`zcode-switch: ${e?.message ?? e}`)
+  }
+  const switchIds = new Set(switchAccounts.map((a) => String(a.switchId ?? "")))
+  const covered = new Set()
   try {
     for (const a of authStoreEntries(opts)) {
       if (!a.state.jwt) continue
+      const id = String(a.state.switchId ?? "")
+      const hasTwin = id !== "" && switchIds.has(id)
+      if (hasTwin && jwtExpired(a.state.jwt)) continue
+      if (hasTwin) covered.add(id)
       options.push({ label: `${a.accountId}（已登录）`, value: `auth:${a.tag}:${a.id}`, hint: "当前 magpie / OpenCode 里已登录的账号" })
     }
   } catch (e) {
     log?.(`auth store: ${e?.message ?? e}`)
   }
   try {
-    const { accounts } = switchScan(log)
-    for (const a of accounts.slice(0, SWITCH_MAX_OPTIONS)) {
+    for (const a of switchAccounts) {
+      if (covered.has(String(a.switchId ?? ""))) continue
       const d = describeAccount(a)
       if (!d.jwt) continue
       options.push({ label: d.label, value: `sw:${a.switchId}`, hint: `${d.siteName} · 领取后自动刷新该账号` })
