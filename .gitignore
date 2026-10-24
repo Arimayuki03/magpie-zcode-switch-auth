@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+
+# build / tooling output
+.tools/
+.sandbox/
+ref-*/
+*.log
+
+# local tool state (agents, reviewers, caches)
+.mimosa/
+.opencodereview/
+.v2c/
+.zcode/
+
+# account credentials and backups must never be committed
+*.zsb
+.zcode-switch/
+plugin-auth.json
+
+# OS noise
+.DS_Store
+Thumbs.db

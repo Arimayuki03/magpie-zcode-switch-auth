@@ -1,0 +1,2 @@
+# normalize line endings across OSes (CI runs on ubuntu, macos, windows)
+* text=auto eol=lf

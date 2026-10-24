@@ -1,0 +1,48 @@
+{
+  "name": "magpie-zcode-switch-auth",
+  "version": "0.1.0",
+  "description": "ZCode (GLM Coding Plan) for magpie: ZCode's own browser sign-in with callback, plus importing Z·SWITCH / zcode-switch saved accounts and .zsb bundles",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": "./src/index.mjs",
+  "files": [
+    "src/index.mjs",
+    "src/prompt.mjs",
+    "src/zswitch.mjs",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "magpie",
+    "opencode",
+    "opencode-plugin",
+    "auth",
+    "provider",
+    "zcode",
+    "zcode-switch",
+    "z.ai",
+    "bigmodel",
+    "glm",
+    "coding-plan"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Arimayuki03/magpie-zcode-switch-auth.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Arimayuki03/magpie-zcode-switch-auth/issues"
+  },
+  "homepage": "https://github.com/Arimayuki03/magpie-zcode-switch-auth#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node scripts/check.mjs"
+  },
+  "magpie": {
+    "maxConcurrency": 4
+  }
+}
