@@ -27,6 +27,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { arch, homedir, release, userInfo } from "node:os"
 import { isAbsolute, join } from "node:path"
 import PROMPT from "./prompt.mjs"
+import { startClaimSession, previewPlans } from "./claim.mjs"
 import {
   accountsFromPayload,
   describeAccount,
@@ -575,36 +576,43 @@ async function giftOf(s) {
   return out
 }
 
+// CLIENT_META is the plugin's view of the ZCode client the billing
+// endpoints (claim, preview) see: the version this plugin makes, the
+// platform, and the machine's locale and zone.
+const CLIENT_META = () => {
+  const o = intl()
+  return {
+    appVersion: APP_VERSION,
+    platform: platform(),
+    osCategory: osCategory(),
+    osVersion: release(),
+    language: o.locale || "zh-CN",
+    timezone: o.timeZone || "Asia/Shanghai",
+  }
+}
+
 // CLAIM_HINT is the claim line's name: a fixed sentence, so magpie
 // translates it with the interface's own language (the plan's name and
 // the count are data, and go in the display, which is shown as it came).
 const CLAIM_HINT = "Gift plans to claim in the ZCode app"
 
-// claimHint is the card's line for gift plans ZCode is holding for the
-// account but has not put on it: GET /billing/preview lists them, and
-// only the ZCode app claims one — its claim takes the Aliyun captcha
-// attestation the app's own renderer makes, so the plugin reads the list
-// and asks the user to claim it there. A window, set aside (it is no
-// allowance: using it up stops nothing), so the card shows it and
-// routing, caps and the menu bar pass it over. The window's name is a
-// fixed sentence, so magpie can translate it (a display is shown as it
-// came); the count and the plan's own name go in the display. null when
-// there is nothing to claim, the preview failing or listing none among
-// it: a failed read is no line at all, never a card or a refusal of its
-// own.
-async function claimHint(s) {
-  if (!s.jwt || jwtExpired(s.jwt)) return null
-  let d
+// claimHints are the card's lines for gift plans ZCode is holding for the
+// account but has not put on it: GET /billing/preview lists them, and the
+// plugin can claim one — its claim takes the Aliyun captcha attestation
+// the ZCode app's renderer makes, so the captcha page (claim.mjs) collects
+// it in the browser while the request itself goes out from here. Each plan
+// is a window, set aside (it is no allowance: using it up stops nothing),
+// named by the fixed sentence with the plan and its grants in the display.
+// A failed read is no line at all, never a card or a refusal of its own.
+async function claimHints(s) {
+  if (!s.jwt || jwtExpired(s.jwt)) return []
+  let plans = []
   try {
-    d = await call("GET", `${ZCODE}/api/v1/zcode-plan/billing/preview?app_version=${APP_VERSION}&platform=${platform()}`, { auth: "Bearer " + s.jwt, device: s.device })
+    plans = await previewPlans({ fetchImpl: (...a) => fetch(...a), officialURL, meta: CLIENT_META(), jwt: s.jwt, device: s.device })
   } catch {
-    return null
+    return []
   }
-  const plans = (Array.isArray(d?.plans) ? d.plans : []).filter((p) => typeof p?.plan_id === "string" && p.plan_id.trim())
-  if (!plans.length) return null
-  const n = plans.length
-  const plan = first(...plans.map((p) => (typeof p?.name === "string" ? p.name : "")), "ZCode gift plan")
-  return { name: CLAIM_HINT, used: 0, aside: true, display: `${n} · ${plan}` }
+  return plans.slice(0, 4).map((p) => ({ name: CLAIM_HINT, used: 0, aside: true, display: p.display || p.name }))
 }
 
 // startUsage is a gift-only account's card: its buckets, or the words
@@ -1916,6 +1924,115 @@ function switchAuthorize(instructions, work) {
   }
 }
 
+// ---- claiming gift plans ----------------------------------------------------------
+// The card names the plans ZCode is holding for the account (claimHints);
+// this is the claiming itself: pick an account, pass the Aliyun captcha on
+// a local page in the browser (startClaimSession), and spend the tickets —
+// then read the account's sign-in again, so the one the host keeps carries
+// the new plan. ZCODE_AUTO_CLAIM=1 makes the page claim everything it
+// scanned the moment it opens (default off, as zcode-switch's is).
+
+const CLAIM_METHOD_LABEL = "zcode: 领取赠送套餐"
+
+const autoClaim = () => ["1", "true", "yes", "on"].includes(String(process.env.ZCODE_AUTO_CLAIM ?? "").trim().toLowerCase())
+
+// claimOptions lists the accounts a claim can run for: the ZCode app's own
+// sign-in (its JWT is read from this machine at authorize time) and every
+// zcode-switch account that carries a ZCode session token. Reading them
+// stays local and offline, as the import dropdown's does.
+function claimOptions(log) {
+  const options = [{ label: "ZCode app 的当前登录", value: "__app__", hint: "本机 ZCode 客户端当前登录的账号" }]
+  try {
+    const { accounts } = switchScan(log)
+    for (const a of accounts.slice(0, SWITCH_MAX_OPTIONS)) {
+      const d = describeAccount(a)
+      if (!d.jwt) continue
+      options.push({ label: d.label, value: `sw:${a.switchId}`, hint: `${d.siteName} · 领取后自动刷新该账号` })
+    }
+  } catch (e) {
+    log?.(`zcode-switch: ${e?.message ?? e}`)
+  }
+  return options
+}
+
+// claimAuthorize starts the captcha page and hands the host its address.
+// Its callback waits for the page's outcomes, then re-reads the account's
+// sign-in, so the plan the claim added is on the saved entry at once.
+async function claimAuthorize(inputs, ctx) {
+  const pick = String(inputs?.account ?? "")
+  let jwt = ""
+  let device = ""
+  let label = ""
+  let refresh = null
+  if (pick === "__app__") {
+    const own = ownSignIn()
+    if (!own?.jwt) throw new Error("本机 ZCode 未登录，或没有可用的 ZCode 会话；请先在 ZCode 客户端登录")
+    jwt = own.jwt
+    device = own.device || anyDevice
+    label = own.user || "ZCode app"
+    refresh = () => asZCode().callback()
+  } else if (pick.startsWith("sw:")) {
+    const id = pick.slice(3)
+    const { accounts, dir } = switchScan(ctx.log)
+    const a = accounts.find((x) => x.switchId === id)
+    if (!a) throw new Error(`zcode-switch 里找不到账号 ${id}${dir ? `（${dir}）` : ""}`)
+    const d = describeAccount(a)
+    if (!d.jwt) throw new Error("该账号没有可用的 ZCode 会话（JWT）；请在 zcode-switch / ZCode 里重新登录并保存账号")
+    jwt = d.jwt
+    device = d.device
+    label = d.label
+    refresh = () => switchImportOne(id, ctx)
+  } else {
+    throw new Error("请选择要领取赠送套餐的账号")
+  }
+  const auto = autoClaim()
+  const session = await startClaimSession({
+    fetchImpl: (...a) => fetch(...a),
+    officialURL,
+    meta: CLIENT_META(),
+    jwt,
+    device,
+    label,
+    auto,
+    log: ctx.note,
+  })
+  return {
+    url: session.url,
+    instructions: auto
+      ? "页面打开后自动逐个领取全部可领套餐；需要人工验证时在页面里完成滑块即可。"
+      : "在页面里选择套餐领取（或全部领取）；需要人工验证时完成滑块即可。",
+    method: "auto",
+    async callback() {
+      let outcome
+      try {
+        outcome = await session.wait(5 * 60_000)
+      } finally {
+        session.close()
+      }
+      const msg = `已领取 ${outcome.claimed.length} 个赠送套餐${outcome.failed.length ? `，失败 ${outcome.failed.length} 个` : ""}`
+      ctx.note(`zcode 领取：${msg}${outcome.scans === "timeout" ? "（页面未点完成，按已收到的结果收尾）" : ""}`)
+      try {
+        ctx.client?.tui?.showToast?.({ body: { title: "ZCode · 领取赠送套餐", message: msg, variant: outcome.failed.length ? "warning" : "success" } })
+      } catch {}
+      for (const f of outcome.failed) ctx.note(`zcode 领取失败：${f.name || f.planId}: ${f.message}`)
+      if (!outcome.claimed.length) {
+        const why = outcome.failed[0]?.message
+        return { type: "failed", error: why ? `没有领取任何套餐：${why}` : "没有领取任何套餐（页面未完成验证，或已超时）" }
+      }
+      // the claim changed the account's plan: the route and spent-model
+      // caches hold what the old plan answered, and the refresh re-reads
+      // the sign-in so the host keeps one carrying the new plan
+      routes.clear()
+      blocked.clear()
+      try {
+        return await refresh()
+      } catch (e) {
+        return { type: "failed", error: `套餐已领取（${outcome.claimed.length} 个），但刷新登录状态失败：${e?.message ?? e}；请重新导入该账号` }
+      }
+    },
+  }
+}
+
 // ---- the plugin ------------------------------------------------------------------
 
 export async function ZCodeAuthPlugin({ client, project } = {}) {
@@ -2142,12 +2259,12 @@ export async function ZCodeAuthPlugin({ client, project } = {}) {
           const { start, gift } = await plansOf(s)
           const card = saved(start ? await startUsage(s) : gift ? await dualUsage(s) : await codingUsage(s))
           // a gift plan ZCode holds for the account but has not put on it:
-          // named on the card, claimed in the ZCode app (its claim needs
-          // the app's captcha attestation, see claimHint). A card that is
-          // an error keeps its error and asks nothing
+          // named on the card (one line each), claimed through the claim
+          // method (its captcha needs a browser, see claimAuthorize). A
+          // card that is an error keeps its error and asks nothing
           if (!card.error) {
-            const hint = await claimHint(s)
-            if (hint) card.windows = [...(card.windows ?? []), hint]
+            const hints = await claimHints(s)
+            if (hints.length) card.windows = [...(card.windows ?? []), ...hints]
           }
           return card
         } catch (e) {
@@ -2240,6 +2357,22 @@ export async function ZCodeAuthPlugin({ client, project } = {}) {
           authorize: (inputs) =>
             switchAuthorize("正在读取 zcode-switch 备份…", () => switchImportBundle(inputs, switchCtx)),
         },
+        // a gift plan ZCode holds for the account: the local captcha page
+        // collects the attestation in the browser, the claim goes out from
+        // here, and the account's sign-in is read again afterwards
+        {
+          type: "oauth",
+          label: CLAIM_METHOD_LABEL,
+          prompts: [
+            {
+              type: "select",
+              key: "account",
+              message: "为哪个账号领取赠送套餐？",
+              options: claimOptions(log),
+            },
+          ],
+          authorize: (inputs) => claimAuthorize(inputs, switchCtx),
+        },
       ],
     },
   }
@@ -2247,8 +2380,8 @@ export async function ZCodeAuthPlugin({ client, project } = {}) {
 
 // for tests
 export const _internal = {
-  entry, limitWindows, termOf, startUsage, routes, blocked, plansOf, giftOf, dualUsage, claimHint, spentUp, giftServes, modelOf,
+  entry, limitWindows, termOf, startUsage, routes, blocked, plansOf, giftOf, dualUsage, claimHints, spentUp, giftServes, modelOf,
   teamKeys, ownSignIn, stateOf, dress, PROMPT,
   switchScan, switchOptions, switchResult, switchAuthEntry, switchImport, switchImportOne, switchImportAll, switchImportBundle,
-  switchAuthorize,
+  switchAuthorize, claimOptions, claimAuthorize, autoClaim,
 }

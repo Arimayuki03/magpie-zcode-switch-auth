@@ -66,6 +66,18 @@ same, and what is added is importing zcode-switch accounts.
 - Understands ZCode's `enc:v1:` encrypted credentials (accounts preserved
   by zcode-switch from ZCode's local storage)
 
+**Claiming gift plans** (the same flow zcode-switch uses)
+
+- Auto-detection: the usage card lists every gift plan the account can
+  claim, with its grants
+- Manual claim: pick "领取赠送套餐" (claim gift plans) in the sign-in menu,
+  pass the Aliyun captcha in the browser (traceless first, slider as the
+  fallback), and it is claimed
+- Auto-claim: with `ZCODE_AUTO_CLAIM=1` the page claims every detected plan
+  as soon as it opens (off by default)
+- Refresh: after a successful claim the account's sign-in is re-resolved
+  and saved, and the usage caches are invalidated
+
 **Carried over from the official plugin**
 
 - Models discovered per account (including the gift plans' `-Trial` models)
@@ -119,7 +131,7 @@ For local development, replace the package name with a relative path such as
 
 ```sh
 magpie plugin                 # should print zcode (ZCode, 4 models)
-magpie plugin --json          # the 8 sign-in methods and the models
+magpie plugin --json          # the 9 sign-in methods and the models
 ```
 
 ## Sign-in and import methods
@@ -142,6 +154,7 @@ magpie plugin login zcode "zcode-switch: 导入全部已保存账号"
 | 6 | `zcode-switch: 导入一个已保存账号` (import one saved account) | Choose from `~/.zcode-switch/accounts` |
 | 7 | `zcode-switch: 导入全部已保存账号` (import all saved accounts) | Bulk import (multiple accounts under magpie) |
 | 8 | `zcode-switch: 导入 .zsb / JSON 备份` (import a .zsb / JSON backup) | Give a file path or paste JSON, then the password |
+| 9 | `zcode: 领取赠送套餐` (claim gift plans) | Detects claimable plans, passes the captcha in the browser, claims and refreshes the account |
 
 > The method labels come from the plugin itself and are partly Chinese; the
 > numbered selection works the same in English.
@@ -201,6 +214,42 @@ On the CLI the password can come from the environment instead:
 ```sh
 ZSW_PASSWORD='your password' magpie plugin login zcode 8
 ```
+
+### Method 9: claim gift plans
+
+The same flow as zcode-switch's claiming: detect the gift plans ZCode is
+holding for the account but has not granted yet, pass the Aliyun captcha,
+claim them, and refresh the account's state.
+
+1. In the sign-in menu pick "领取赠送套餐" (claim gift plans), then an
+   account (the local ZCode app's sign-in, or any zcode-switch account);
+2. the plugin serves a temporary page on `127.0.0.1` and opens it in the
+   browser: it lists the claimable plans found by a live scan (name,
+   grants, period);
+3. claim each plan, or all of them at once; the captcha passes tracelessly
+   when it can, and only asks for the slider under risk control;
+4. the claim request itself goes out from the plugin with the account's own
+   JWT (the captcha ticket travels in the `X-Aliyun-Captcha-Verify-Param`
+   header; the page never touches any token);
+5. when the page is done, the plugin re-resolves the account and saves it —
+   the new plan's allowance and models are usable at once.
+
+Notes:
+
+- **Auto-detection**: no need to open the claim page — the usage card lists
+  the claimable plans, one line each, with their grants.
+- **Manual detection / refresh**: the page rescans on demand; a successful
+  claim refreshes the account by itself, no re-import needed.
+- **Auto-claim**: set `ZCODE_AUTO_CLAIM=1` (off by default, like
+  zcode-switch's toggle) and the page claims every detected plan as soon as
+  it opens.
+- **Common failure codes**: `1002` the event has ended, `1003` already
+  claimed, `1004` not eligible, `1005` today's quota is used up, `3007`
+  captcha check failed (just retry).
+- **Limits**: the captcha needs a real browser, so fully unattended
+  claiming is not possible; the page binds `127.0.0.1` only, so a claim
+  started inside a Docker container cannot be opened from the host — run
+  claims from the magpie / OpenCode on the host machine.
 
 ## Environments
 
@@ -276,6 +325,7 @@ Notes:
 | `ZCODE_SWITCH_HOME` | Points at the directory holding zcode-switch's data when it is not in the default home (the plugin reads `$ZCODE_SWITCH_HOME/.zcode-switch/accounts`) |
 | `ZCODE_CREDENTIAL_SECRET` | Overrides the seed ZCode's `enc:v1:` credentials are opened with; points back at the original machine's seed for accounts saved under another machine or username |
 | `ZSW_PASSWORD` | A fallback source for method 8's password (read when the password prompt is left empty on the CLI) |
+| `ZCODE_AUTO_CLAIM` | When set to `1`, the claim page claims every detected plan by itself as soon as it opens (off by default) |
 
 ## Import details
 
@@ -356,7 +406,7 @@ and import that.
 ## How it works
 
 - The plugin is a provider (id `zcode`) in magpie / OpenCode: `config`
-  declares the model table, `auth.methods` offers the 8 sign-in methods, and
+  declares the model table, `auth.methods` offers the 9 sign-in methods, and
   `auth.loader` takes over routing and authentication for model requests.
 - Every outbound request goes through a host whitelist: only `zcode.z.ai`,
   `api.z.ai`, `bigmodel.cn` and `open.bigmodel.cn` are allowed.
@@ -420,6 +470,13 @@ official way, or sign the account in again in zcode-switch and import.
 A `.zsb` path can be pasted as `C:\Users\…\accounts.zsb`; quotes and `~/`
 are both fine.
 
+**Claiming fails / the captcha check fails?**
+`3007` means the captcha ticket expired or was rejected — retry once;
+`1002`/`1005` mean the event ended or today's quota is used up; `1003`
+means the plan was already claimed. If the claim page does not open, check
+that magpie can reach `127.0.0.1` (claims started inside a Docker container
+must be run on the host instead).
+
 **Can I import inside Docker / a container?**
 Yes, with methods 5–8 (API key or a backup import). Method 4 needs a local
 ZCode client and is not available in a container; methods 1–3 need a browser
@@ -437,6 +494,7 @@ Layout:
 ```text
 src/index.mjs     # plugin entry (the official zcode plugin + zcode-switch imports)
 src/zswitch.mjs   # account library, enc:v1 and .zsb decryption, state
+src/claim.mjs     # gift-plan claiming: preview/claim endpoints, local captcha page
 src/prompt.mjs    # the Start Plan system prompt (as the official plugin has it)
 test/             # unit tests and sign-in callback tests
 scripts/check.mjs # plugin shape check

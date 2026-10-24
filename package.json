@@ -1,6 +1,6 @@
 {
   "name": "magpie-zcode-switch-auth",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "ZCode (GLM Coding Plan) for magpie: ZCode's own browser sign-in with callback, plus importing Z·SWITCH / zcode-switch saved accounts and .zsb bundles",
   "type": "module",
   "main": "./src/index.mjs",
@@ -9,6 +9,7 @@
     "src/index.mjs",
     "src/prompt.mjs",
     "src/zswitch.mjs",
+    "src/claim.mjs",
     "README.md",
     "README.en.md",
     "LICENSE"

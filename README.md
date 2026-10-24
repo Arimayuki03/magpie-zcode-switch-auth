@@ -57,6 +57,13 @@ Provider id 是 `zcode`，与官方社区插件 [`@magpie-community/opencode-zco
 - 导入 `.zsb` 加密备份（PBKDF2-HMAC-SHA256 100k + AES-256-GCM）或普通 `zcode-accounts-bundle` JSON
 - 支持 ZCode 的 `enc:v1:` 加密凭据（zcode-switch 从 ZCode 本地存储保全的账号）
 
+**领取赠送套餐**（与 zcode-switch 同款流程）
+
+- 自动识别：用量卡片上直接列出账号可领取的赠送套餐（名称与额度）
+- 手动领取：登录菜单选「领取赠送套餐」，浏览器完成阿里云验证（无痕优先，失败转滑块）后即领
+- 自动领取：`ZCODE_AUTO_CLAIM=1` 时页面打开后自动逐个领取（默认关）
+- 刷新状态：领取成功后自动重新解析该账号并保存，额度缓存同步失效
+
 **其余能力沿用官方插件**
 
 - 按账号自动发现模型（含赠额计划的 `-Trial` 模型）
@@ -107,7 +114,7 @@ magpie plugin add /path/to/magpie-zcode-switch-auth   # 或指定路径
 
 ```sh
 magpie plugin                 # 应显示 zcode (ZCode, 4 models)
-magpie plugin --json          # 查看 8 种登录方式和模型
+magpie plugin --json          # 查看 9 种登录方式和模型
 ```
 
 ## 登录与导入方式
@@ -130,6 +137,7 @@ magpie plugin login zcode "zcode-switch: 导入全部已保存账号"
 | 6 | `zcode-switch: 导入一个已保存账号` | 从 `~/.zcode-switch/accounts` 选择 |
 | 7 | `zcode-switch: 导入全部已保存账号` | 批量导入（magpie 多账号） |
 | 8 | `zcode-switch: 导入 .zsb / JSON 备份` | 填文件路径或直接粘贴 JSON，再填口令 |
+| 9 | `zcode: 领取赠送套餐` | 自动识别可领套餐，浏览器过验证码后领取并刷新账号 |
 
 ### 方式 1–3：浏览器登录
 
@@ -170,6 +178,24 @@ magpie plugin login zcode 8
 ```sh
 ZSW_PASSWORD='你的口令' magpie plugin login zcode 8
 ```
+
+### 方式 9：领取赠送套餐
+
+与 zcode-switch 的「活动领取」同款流程：识别 ZCode 挂在账号上、还没发到你名下的赠送套餐，过阿里云验证码后领取，并刷新账号状态。
+
+1. 在登录菜单选「领取赠送套餐」，再选账号（本机 ZCode 当前的登录，或任一 zcode-switch 账号）；
+2. 插件在 `127.0.0.1` 起一个临时页面并在浏览器打开：页面上列出实时扫描到的可领套餐（名称、额度、周期）；
+3. 每个套餐单独「领取」或「全部领取」；验证码优先无痕通过，风控时才需要手动完成滑块；
+4. 领取请求由插件携带该账号自己的 JWT 发出（验证码回执经 `X-Aliyun-Captcha-Verify-Param` 头传递，页面不接触任何令牌）；
+5. 全部完成后插件自动重新解析该账号并保存——新套餐的额度和模型立即可用。
+
+要点：
+
+- **自动识别**：不需要进领取页，用量卡片上就会列出可领套餐（每行一个，标注额度）。
+- **手动识别 / 刷新**：页面上随时「重新扫描」；领取成功会自动刷新，无需重导。
+- **自动领取**：设置环境变量 `ZCODE_AUTO_CLAIM=1`（默认关，与 zcode-switch 一致）后，页面打开即自动逐个领取全部可领套餐。
+- **领取失败的常见码**：`1002` 活动已结束、`1003` 已领取过、`1004` 不符合条件、`1005` 今日名额用完、`3007` 验证码校验失败（重试即可）。
+- **限制**：验证码需要真实浏览器渲染，所以无法完全无人值守；页面只绑定 `127.0.0.1`，Docker 容器内发起的领取无法从宿主机打开——请在宿主机的 magpie / OpenCode 上执行领取。
 
 ## 部署环境
 
@@ -237,6 +263,7 @@ opencode auth login    # 交互选择 ZCode 的登录/导入方式
 | `ZCODE_SWITCH_HOME` | zcode-switch 数据目录不在默认 home 时，指向其所在目录（插件读取 `$ZCODE_SWITCH_HOME/.zcode-switch/accounts`） |
 | `ZCODE_CREDENTIAL_SECRET` | 覆盖 ZCode `enc:v1:` 凭据的解密种子；换过机器或用户名的账号用它指回原机器的种子 |
 | `ZSW_PASSWORD` | 方式 8 的口令备用来源（命令行下口令提示留空时读取） |
+| `ZCODE_AUTO_CLAIM` | 设为 `1` 时，领取页面打开后自动逐个领取全部可领套餐（默认关） |
 
 ## 导入细节
 
@@ -290,7 +317,7 @@ SHA-256("zcode-credential-fallback:<platform>:<home>:<username>")
 
 ## 工作原理
 
-- 插件作为 provider（id `zcode`）挂进 magpie / OpenCode：`config` 声明模型表，`auth.methods` 提供 8 种登录方式，`auth.loader` 接管模型请求的路由与鉴权。
+- 插件作为 provider（id `zcode`）挂进 magpie / OpenCode：`config` 声明模型表，`auth.methods` 提供 9 种登录方式，`auth.loader` 接管模型请求的路由与鉴权。
 - 每个出站请求都做主机白名单校验，只允许 `zcode.z.ai`、`api.z.ai`、`bigmodel.cn`、`open.bigmodel.cn`。
 - Start Plan 请求按 ZCode 客户端的原样发送（头部与系统提示词保持一致），赠额模型以 `-Trial` 后缀暴露给选择器。
 
@@ -325,6 +352,9 @@ ZCode 登录失效或 Start Plan 已结束。重新走官方登录，或在 zcod
 **Windows 上路径怎么写？**
 `.zsb` 路径可以直接粘贴 `C:\Users\…\accounts.zsb`，支持带引号和 `~/`。
 
+**领取赠送套餐失败 / 提示验证码校验失败？**
+`3007` 是验证码回执过期或无效，重试一次即可；`1002/1005` 是活动结束或今日名额用完；`1003` 说明已经领过。领取页面打不开时确认 magpie 能访问 `127.0.0.1`（Docker 容器内发起的领取请在宿主机执行）。
+
 **Docker / 容器里能导入吗？**
 可以，用方式 5–8（API key 或备份导入）。方式 4 需要本机装有 ZCode 客户端，容器里不可用；浏览器登录（方式 1–3）的授权页要在宿主机浏览器里完成。
 
@@ -340,6 +370,7 @@ npm run check     # 按 magpie / OpenCode 的方式加载插件并检查 hook �
 ```text
 src/index.mjs     # 插件入口（官方 zcode 插件 + zcode-switch 导入）
 src/zswitch.mjs   # 账号库读取、enc:v1 解密、.zsb 解密、状态生成
+src/claim.mjs     # 赠送套餐领取：preview/claim 接口、本地验证码页
 src/prompt.mjs    # Start Plan 系统提示词（官方插件原样）
 test/             # 单元测试与登录回调测试
 scripts/check.mjs # 插件结构检查
